@@ -14,10 +14,148 @@ A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License along with
 this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
+#include "hashmap/hashmap.h"
+
 #include "makeint.h"
 #include "hash.h"
 #include "filedef.h"
 #include "dep.h"
+
+#include <Windows.h>
+
+struct FindFileCache
+{
+    char* name;
+    int nameLength;    
+    struct stat statData;
+    bool exists;
+};
+
+static uint64_t FIndFileCacheHash(const void *item, uint64_t seed0, uint64_t seed1) {
+    const struct FindFileCache *cache = item;
+    return hashmap_sip(cache->name, strlen(cache->name), seed0, seed1);
+}
+
+static int FindFileCacheCompare(const void *a, const void *b, void *udata) {
+    const struct FindFileCache *ca = a;
+    const struct FindFileCache *cb = b;
+    return ca->nameLength == cb->nameLength && strncmp(ca->name, cb->name, ca->nameLength);
+}
+
+static struct hashmap* g_findFileCache = 0;
+
+static const uint64_t SECS_BETWEEN_1601_AND_1970_EPOCHS = 11644473600LL;
+static const uint64_t SECS_TO_100NS = 10000000;
+
+void cache_files(const char* root, int recursive, int symlinks, int directories, int init)
+{
+    if(!g_findFileCache)
+    {
+        g_findFileCache = hashmap_new(sizeof(struct FindFileCache), 256 * 1024, 0, 0, FIndFileCacheHash, FindFileCacheCompare, NULL, NULL);
+    }
+    if(init)
+    {
+        hashmap_clear(g_findFileCache, 0);
+    }
+
+    int rootLength = strlen(root);
+    char path[4096];
+    memset(path, 0, sizeof(path));
+    memcpy(path, root, rootLength + 1);    
+    for(int i=0;i<rootLength;++i)
+    {
+        if(path[i] == '/')
+        {
+            path[i] = '\\';
+        }
+    }
+    if(path[rootLength-1] != '\\')
+    {
+        path[rootLength++] = '\\';                
+    }   
+    WIN32_FIND_DATAA findData = {0};
+    HANDLE handle;
+    {
+        char searchPath[4096];
+        memcpy(searchPath, path, rootLength + 1);
+        int searchPathLength = rootLength;
+        searchPath[searchPathLength++] = '*';
+        searchPath[searchPathLength++] = '.';
+        searchPath[searchPathLength++] = '*';
+        searchPath[searchPathLength++] = 0;
+        handle = FindFirstFileA(searchPath, &findData);
+    }
+    if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    do {
+        const char* fileName = findData.cFileName;
+        const int fileNameLength = strlen(fileName);
+        struct FindFileCache fileCache;
+        memset(&fileCache.statData, 0, sizeof(fileCache.statData));
+        fileCache.statData.st_mtime = (((uint64_t)findData.ftLastWriteTime.dwLowDateTime | ((uint64_t)findData.ftLastWriteTime.dwHighDateTime << 32)) - (SECS_BETWEEN_1601_AND_1970_EPOCHS * SECS_TO_100NS)) / SECS_TO_100NS;
+        fileCache.statData.st_ctime = (((uint64_t)findData.ftCreationTime.dwLowDateTime | ((uint64_t)findData.ftCreationTime.dwHighDateTime << 32)) - (SECS_BETWEEN_1601_AND_1970_EPOCHS * SECS_TO_100NS)) / SECS_TO_100NS;
+        fileCache.statData.st_atime = (((uint64_t)findData.ftLastAccessTime.dwLowDateTime | ((uint64_t)findData.ftLastAccessTime.dwHighDateTime << 32)) - (SECS_BETWEEN_1601_AND_1970_EPOCHS * SECS_TO_100NS)) / SECS_TO_100NS;
+        fileCache.statData.st_size = findData.nFileSizeLow | ((uint64_t)findData.nFileSizeHigh << 32);
+
+        if (recursive && (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (symlinks || (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                if (fileNameLength > 2 || fileName[0] != '.') {
+                    char* combinedPath = malloc(4096);                    
+                    int combinedPathLength = rootLength;
+                    memcpy(combinedPath, path, combinedPathLength + 1);
+                    memcpy(combinedPath + rootLength, fileName, fileNameLength);
+                    combinedPathLength += fileNameLength;
+                    combinedPath[combinedPathLength++] = 0;
+                    fileCache.nameLength = combinedPathLength - 1;
+                    fileCache.name = combinedPath;
+                    for(int i=0;i<fileCache.nameLength;++i)
+                    {
+                        if(fileCache.name[i]=='\\')
+                        {
+                            fileCache.name[i] = '/';
+                        }
+                    }
+                    fileCache.exists = true;
+                    //stat(combinedPath, &fileCache.statData);
+                    fileCache.statData.st_size = 4096;
+                    fileCache.statData.st_mode = 16895;
+                    fileCache.statData.st_nlink = 1;
+                    hashmap_set(g_findFileCache, &fileCache);
+                    cache_files(combinedPath, 1, 0, 1, 0);
+                }
+            }
+        } else if (findData.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) {
+            char* combinedPath = malloc(4096);
+            const int fileNameLength = strlen(fileName);
+            int combinedPathLength = rootLength;
+            memcpy(combinedPath, path, combinedPathLength + 1);
+            memcpy(combinedPath + rootLength, fileName, fileNameLength);
+            combinedPathLength += fileNameLength;
+            combinedPath[combinedPathLength++] = 0;            
+            fileCache.nameLength = combinedPathLength - 1;
+            fileCache.name = combinedPath;
+            for(int i=0;i<fileCache.nameLength;++i)
+            {
+                if(fileCache.name[i]=='\\')
+                {
+                    fileCache.name[i] = '/';
+                }
+            }
+            fileCache.exists = true;           
+            fileCache.statData.st_mode = 33206;
+            fileCache.statData.st_nlink = 1;            
+            //stat(combinedPath, &fileCache.statData);
+            hashmap_set(g_findFileCache, &fileCache);
+        }
+    } while (FindNextFileA(handle, &findData) != 0);
+
+    if(init)
+    {
+        printf("Makefile directory '%s' - found %d files!\n", root, hashmap_count(g_findFileCache));
+    }
+}
+
 
 #ifdef  HAVE_DIRENT_H
 # include <dirent.h>
@@ -432,6 +570,45 @@ dirfile_hash_cmp (const void *xv, const void *yv)
   return_ISTRING_COMPARE (x->name, y->name);
 }
 
+int optimizedStat(const char* fileName, struct stat* st)
+{
+    int r = 0;
+    struct FindFileCache fileCache;
+    if(fileName[0] != '.')
+    {
+        fileCache.name = fileName;
+        fileCache.nameLength = strlen(fileCache.name);
+    }
+    else 
+    {
+        fileCache.name = fileName + 2;
+        fileCache.nameLength = strlen(fileCache.name) - 2;
+    }
+    struct FindFileCache* foundFileCache = hashmap_get(g_findFileCache, &fileCache);
+
+    if (foundFileCache)
+    {
+        if(!foundFileCache->exists)
+        {
+            r = -1;
+        } else {
+            *st = foundFileCache->statData;        
+        }
+    } else 
+    {
+        r = stat (fileName, st);
+        struct FindFileCache newFileCache;
+        newFileCache.nameLength = strlen(fileName);
+        newFileCache.name = xmalloc(newFileCache.nameLength + 1);
+        newFileCache.exists = r >= 0;
+        newFileCache.statData = *st;
+        memcpy(newFileCache.name, fileName, newFileCache.nameLength + 1);
+        hashmap_set(g_findFileCache, &newFileCache);
+        //printf("Stat:%s\n", fileName);
+    }
+    return r;
+}
+
 #ifndef DIRFILE_BUCKETS
 #define DIRFILE_BUCKETS 107
 #endif
@@ -490,7 +667,7 @@ find_directory (const char *name)
              tend--)
           *tend = '\0';
 
-        r = stat (tem, &st);
+        r = optimizedStat (tem, &st);
       }
 #else
       EINTRLOOP (r, stat (name, &st));
@@ -662,7 +839,7 @@ dir_contents_file_exists_p (struct directory_contents *dir,
               dir->mtime = time ((time_t *) 0);
               rehash = 1;
             }
-          else if (stat (dir->path_key, &st) == 0 && st.st_mtime > dir->mtime)
+          else if (optimizedStat (dir->path_key, &st) == 0 && st.st_mtime > dir->mtime)
             {
               /* reset date stamp to show most recent re-process.  */
               dir->mtime = st.st_mtime;
@@ -780,6 +957,18 @@ file_exists_p (const char *name)
   const char *dirname;
   const char *slash;
 
+  const int nameLength = strlen(name);
+  {
+    struct FindFileCache fileCache;
+    fileCache.name = name;
+    fileCache.nameLength = nameLength;
+    struct FindFileCache* foundFileCache = (struct FindFileCache*)hashmap_get(g_findFileCache, &fileCache);
+    if(foundFileCache)
+    {
+        return foundFileCache->exists;
+    }
+  }
+
 #ifndef NO_ARCHIVES
   if (ar_name (name))
     return ar_member_date (name) != (time_t) -1;
@@ -844,7 +1033,15 @@ file_exists_p (const char *name)
 #else
   slash++;
 #endif
-  return dir_file_exists_p (dirname, slash);
+  const bool exists = dir_file_exists_p(dirname, slash);
+  {      
+      struct FindFileCache fileCache;
+      fileCache.nameLength = nameLength;
+      fileCache.name = xmalloc(fileCache.nameLength + 1);
+      fileCache.exists = exists;
+      memcpy(fileCache.name, name, fileCache.nameLength + 1);
+      hashmap_set(g_findFileCache, &fileCache);
+  }
 }
 
 /* Mark FILENAME as 'impossible' for 'file_impossible_p'.

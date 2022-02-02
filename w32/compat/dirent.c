@@ -37,7 +37,7 @@ opendir(const char* pDirName)
                 errno = EINVAL;
                 return NULL;
         }
-        if (stat(pDirName, &sb) != 0) {
+        if (optimizedStat(pDirName, &sb) != 0) {
                 errno = ENOENT;
                 return NULL;
         }

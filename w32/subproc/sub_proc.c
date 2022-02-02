@@ -394,11 +394,78 @@ process_init_fd(HANDLE stdinh, HANDLE stdouth, HANDLE stderrh)
 }
 
 
+struct FileNameCache
+{
+    char* key;
+    int keyLength;
+    char* name;
+    int nameLength;
+};
+
+static struct FileNameCache g_fileNameCaches[128];
+static int g_fileNameCacheCount = 0;
+
+static const struct FileNameCache* FindInFileNameCache(const char* key)
+{
+    const int length = strlen(key);
+    for(int i=0;i<g_fileNameCacheCount;++i)
+    {
+        struct FileNameCache* fileNameCache = &g_fileNameCaches[i];
+        if(fileNameCache->keyLength != length) {
+            continue;
+        }
+        if(memcmp(fileNameCache->key, key, fileNameCache->keyLength) == 0)
+        {
+            //printf("Found in filename cache:'%s' -> '%s'\n", key, fileNameCache->name);
+            return fileNameCache;
+        }
+    }
+    return 0;
+}
+
+static void AddToFileNameCache(const char* key, const char* fileName)
+{
+    struct FileNameCache* fileNameCache = &g_fileNameCaches[g_fileNameCacheCount++];
+    {
+        fileNameCache->keyLength = strlen(key);
+        char* string = xmalloc(fileNameCache->keyLength + 1);
+        memcpy(string, key, fileNameCache->keyLength + 1);
+        fileNameCache->key = string;    
+    }
+    {
+        fileNameCache->nameLength = strlen(fileName);
+        char* string = xmalloc(fileNameCache->nameLength + 1);
+        memcpy(string, fileName, fileNameCache->nameLength + 1);
+        fileNameCache->name = string;    
+    }
+    //printf("Added to filename cache:'%s'\n", fileName);
+}
+
 static HANDLE
 find_file(const char *exec_path, const char *path_var,
           char *full_fname, DWORD full_len)
 {
-        HANDLE exec_handle;
+    HANDLE exec_handle;
+    if(exec_path && exec_path[1] == ':')
+    {
+        strcpy(full_fname, exec_path);
+        exec_handle = CreateFile(full_fname, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL); 
+        if( exec_handle != INVALID_HANDLE_VALUE)
+        {
+            return(exec_handle);
+        }
+    }   
+
+    const struct FileNameCache* fileNameCache = FindInFileNameCache(exec_path);
+    if(fileNameCache)
+    {
+        strcpy(full_fname, fileNameCache->name);
+        exec_handle = CreateFile(full_fname, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL); 
+        if( exec_handle != INVALID_HANDLE_VALUE)
+        {
+            return(exec_handle);
+        }
+    }     
         char *fname;
         char *ext;
         DWORD req_len;
@@ -437,6 +504,7 @@ find_file(const char *exec_path, const char *path_var,
                                            FILE_ATTRIBUTE_NORMAL,
                                            NULL)) != INVALID_HANDLE_VALUE) {
                         free(fname);
+                        AddToFileNameCache(exec_path, full_fname);
                         return(exec_handle);
                 }
         }

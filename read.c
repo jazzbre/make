@@ -311,9 +311,28 @@ restore_conditionals (struct conditionals *saved)
   conditionals = saved;
 }
 
+
+void cache_files(const char* root, int recursive, int symlinks, int directories, int init);
+
 static struct goaldep *
 eval_makefile (const char *filename, int flags)
 {
+
+    {
+        char path[4096];
+        const int filenameLength = strlen(filename);
+        for(int i=filenameLength-1;i>=0;--i)
+        {
+            if(filename[i] == '\\' || filename[i] == '/')
+            {
+                memcpy(path, filename, i);
+                path[i] = 0;
+                break;
+            }
+        }
+        cache_files(path, 1, 1, 1, 1);
+    }
+
   struct goaldep *deps;
   struct ebuffer ebuf;
   const floc *curfile;

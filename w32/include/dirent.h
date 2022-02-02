@@ -55,5 +55,7 @@ void closedir(DIR *);
 int telldir(DIR *);
 void seekdir(DIR *, long);
 
+int optimizedStat(const char* fileName, struct stat* st);
+
 #endif  /* !__MINGW32__ */
 #endif
